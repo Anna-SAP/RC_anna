@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RC Anna Toolkit
 // @namespace    https://github.com/Anna-SAP/RC_anna
-// @version      0.1.0
+// @version      0.1.1
 // @description  Extensible userscript toolkit for RingCentral web app. Currently includes: Bookmark Search.
 // @author       Anna
 // @match        https://app.ringcentral.com/*
@@ -19,18 +19,7 @@
 
   // =====================================================================
   // RCX core: a tiny extensible framework
-  // ---------------------------------------------------------------------
-  // Register a feature like:
-  //   RCX.register({
-  //     id: 'bookmark-search',
-  //     name: 'Bookmark Search',
-  //     match: (url) => url.includes('/messages/bookmarks'),
-  //     init: (ctx) => { ctx.panel ... ctx.onDestroy(...) }
-  //   });
-  // Each feature gets its own tab in the floating panel and is
-  // mounted/unmounted automatically as the URL changes.
   // =====================================================================
-
   const RCX = (window.__RCX = window.__RCX || {
     features: [],
     log: (...a) => console.log('[RCX]', ...a),
@@ -64,12 +53,17 @@
           #rcx-shell header strong{flex:1;font-size:12px;color:#555;letter-spacing:.3px}
           #rcx-shell header button{cursor:pointer;border:1px solid #c8ccd1;background:#fff;
             border-radius:4px;padding:2px 6px;font-size:11px}
-          #rcx-tabs{display:flex;flex-wrap:wrap;gap:2px;padding:4px 6px;border-bottom:1px solid #eee;background:#f5f7fa}
-          .rcx-tab{cursor:pointer;border:1px solid transparent;background:transparent;
+          #rcx-tabs{display:flex;flex-wrap:wrap;gap:2px;padding:6px 10px;border-bottom:1px solid #eee;background:#f5f7fa}
+          /* single-tab title style: not button-like */
+          #rcx-tabs.single .rcx-tab{cursor:default;background:transparent;border:none;
+            color:#0b66c2;font-weight:600;font-size:13px;padding:2px 0}
+          #rcx-tabs.single .rcx-tab:hover{background:transparent}
+          /* multi-tab button style */
+          #rcx-tabs:not(.single) .rcx-tab{cursor:pointer;border:1px solid transparent;background:transparent;
             border-radius:4px;padding:3px 8px;font-size:12px;color:#444}
-          .rcx-tab:hover{background:#e8ecf1}
-          .rcx-tab.active{background:#fff;border-color:#d0d4d9;color:#0b66c2;font-weight:600}
-          .rcx-tab.disabled{color:#aaa;cursor:not-allowed}
+          #rcx-tabs:not(.single) .rcx-tab:hover{background:#e8ecf1}
+          #rcx-tabs:not(.single) .rcx-tab.active{background:#fff;border-color:#d0d4d9;color:#0b66c2;font-weight:600}
+          #rcx-tabs:not(.single) .rcx-tab.disabled{color:#aaa;cursor:not-allowed}
           #rcx-body{flex:1;overflow:auto;padding:8px}
           #rcx-status{padding:4px 8px;border-top:1px solid #eee;color:#888;font-size:11px;background:#fafbfc;
             border-radius:0 0 8px 8px}
@@ -82,8 +76,8 @@
           .rcx-btn{cursor:pointer;border:1px solid #c8ccd1;background:#f5f7fa;
             border-radius:4px;padding:4px 10px;font-size:12px}
           .rcx-btn:hover{background:#e8ecf1}
-          .rcx-row{display:flex;gap:6px;align-items:center}
-          .rcx-list{display:flex;flex-direction:column;gap:2px}
+          .rcx-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+          .rcx-list{display:flex;flex-direction:column;gap:2px;max-height:50vh;overflow:auto}
           .rcx-item{padding:6px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
           .rcx-item:hover{background:#f0f4fa;border-color:#dde4ef}
           .rcx-item mark{background:#fff2a8;padding:0 1px}
@@ -176,7 +170,6 @@
       activeId = featId;
       bodyEl.innerHTML = '';
       if (!featId) {
-        bodyEl.appendChild(document.createTextNode(''));
         const tip = document.createElement('div');
         tip.className = 'rcx-muted';
         tip.textContent = '当前页面没有可用的工具';
@@ -195,22 +188,22 @@
       const url = location.href;
       const available = RCX.features.filter(f => !f.match || f.match(url));
 
-      // unmount features no longer applicable
       Array.from(mounted.keys()).forEach(id => {
         if (!available.find(f => f.id === id)) unmount(id);
       });
-      // mount newly applicable features
       available.forEach(f => mount(f));
 
-      // rebuild tab bar
       tabsEl.innerHTML = '';
+      // single-tab vs multi-tab visual style
+      tabsEl.classList.toggle('single', available.length === 1);
       RCX.features.forEach(f => {
         const ok = available.includes(f);
+        if (!ok && available.length === 1) return; // hide disabled tabs in single mode
         const t = document.createElement('div');
         t.className = 'rcx-tab' + (ok ? '' : ' disabled');
         t.dataset.id = f.id;
         t.textContent = f.name || f.id;
-        if (ok) t.onclick = () => activate(f.id);
+        if (ok && available.length > 1) t.onclick = () => activate(f.id);
         tabsEl.appendChild(t);
       });
 
@@ -218,7 +211,8 @@
       activate(stillActive ? activeId : (available[0] ? available[0].id : null));
     }
 
-    // Watch for SPA route changes
+    // Watch for SPA route changes ONLY (don't periodically rebuild — that
+    // would kill focus on inputs).
     let lastUrl = location.href;
     setInterval(() => {
       if (location.href !== lastUrl) {
@@ -232,6 +226,14 @@
 
   // =====================================================================
   // Feature: Bookmark Search
+  // ---------------------------------------------------------------------
+  // RingCentral bookmark list specifics (as of 2026-05):
+  //   * Multiple [role="listbox"] exist on the page (emoji pickers etc.)
+  //   * The bookmark one is the listbox whose closest [aria-label] is
+  //     "Bookmarks Page", and whose parent is the virtual-scroll container
+  //     (parent.scrollHeight > parent.clientHeight).
+  //   * Each bookmark item is a DIRECT child <div role="document"> of the
+  //     listbox — NOT role="option".
   // =====================================================================
   RCX.register({
     id: 'bookmark-search',
@@ -255,43 +257,76 @@
         list
       );
 
-      function findListbox() {
-        listbox = document.querySelector('[role="listbox"]');
-        if (!listbox) return false;
-        scrollEl = listbox.parentElement;
-        return !!scrollEl;
+      function findBookmarkListbox() {
+        // pick the listbox that is inside the Bookmarks page region AND
+        // has a virtual-scroll parent.
+        const all = document.querySelectorAll('[role="listbox"]');
+        for (const lb of all) {
+          const ancestor = lb.closest('[aria-label="Bookmarks Page"]');
+          const parent = lb.parentElement;
+          if (!parent) continue;
+          if (ancestor && parent.scrollHeight > parent.clientHeight + 10) {
+            return { listbox: lb, scrollEl: parent };
+          }
+        }
+        // fallback: any listbox whose parent has a much larger scrollHeight
+        for (const lb of all) {
+          const parent = lb.parentElement;
+          if (parent && parent.scrollHeight > parent.clientHeight + 100
+              && lb.scrollHeight > 500) {
+            return { listbox: lb, scrollEl: parent };
+          }
+        }
+        return null;
       }
+
+      function getItems() {
+        if (!listbox) return [];
+        // direct children that look like a bookmark item
+        return Array.from(listbox.children).filter(c =>
+          c.tagName === 'DIV'
+          && c.offsetHeight > 20
+          && (c.innerText || '').trim().length > 0
+        );
+      }
+
       const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
       async function scanAll() {
-        if (!findListbox()) { info.textContent = '未找到 bookmark 列表'; return; }
+        const found = findBookmarkListbox();
+        if (!found) { info.textContent = '未找到 Bookmarks 列表，请确认在 Bookmarks 页面'; return; }
+        listbox = found.listbox; scrollEl = found.scrollEl;
         info.textContent = '扫描中…';
         const seen = new Map();
         scrollEl.scrollTop = 0;
         await sleep(300);
         const step = Math.max(200, scrollEl.clientHeight - 100);
-        let pos = 0, safety = 0;
+        let pos = 0, safety = 0, lastTotal = -1;
         while (safety < 500) {
           scrollEl.scrollTop = pos;
-          await sleep(120);
-          const opts = listbox.querySelectorAll('[role="option"]');
-          opts.forEach(o => {
-            const top = o.offsetTop;
+          await sleep(150);
+          const items = getItems();
+          items.forEach(el => {
+            const top = el.offsetTop;
             if (!seen.has(top)) {
-              const txt = (o.innerText || '').trim().replace(/\s+/g, ' ');
+              const txt = (el.innerText || '').trim().replace(/\s+/g, ' ');
               if (txt) seen.set(top, { text: txt, offsetTop: top });
             }
           });
           const total = listbox.scrollHeight;
           info.textContent = `扫描中… ${seen.size} 条 (${Math.min(pos,total)}/${total}px)`;
-          if (pos >= total) break;
+          if (pos >= total) {
+            if (total === lastTotal) break;
+            lastTotal = total;
+          }
           pos += step; safety++;
         }
         scrollEl.scrollTop = 0;
         cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
         info.textContent = `共 ${cache.length} 条`;
+        console.log('[RCX] bookmark scan done, count=', cache.length);
         render(input.value);
       }
 
@@ -321,14 +356,16 @@
       }
 
       async function jumpTo(item) {
-        if (!findListbox()) return;
+        const found = findBookmarkListbox();
+        if (!found) return;
+        listbox = found.listbox; scrollEl = found.scrollEl;
         scrollEl.scrollTop = Math.max(0, item.offsetTop - 80);
         await sleep(200);
-        const opts = listbox.querySelectorAll('[role="option"]');
+        const items = getItems();
         let best = null, bestDiff = Infinity;
-        opts.forEach(o => {
-          const d = Math.abs(o.offsetTop - item.offsetTop);
-          if (d < bestDiff) { bestDiff = d; best = o; }
+        items.forEach(el => {
+          const d = Math.abs(el.offsetTop - item.offsetTop);
+          if (d < bestDiff) { bestDiff = d; best = el; }
         });
         if (best) {
           const oldBox = best.style.boxShadow;
@@ -351,18 +388,16 @@
   });
 
   // =====================================================================
-  // (Future features: just call RCX.register({...}) here or in another
-  // script block. Each will appear as its own tab in the panel.)
+  // (Add more features here with RCX.register({...}) in the future.)
   // =====================================================================
 
-  // initial mount once DOM is ready
+  // Initial mount once DOM is ready. NOTE: we DO NOT call refresh on a
+  // timer — the SPA route watcher inside Shell handles re-mounting on
+  // navigation, and periodic rebuilds would steal focus from inputs.
   const boot = setInterval(() => {
     if (document.body) {
       clearInterval(boot);
-      // give SPA a moment
       setTimeout(() => Shell.refresh && Shell.refresh(), 500);
-      // and refresh periodically in case features depend on late-loaded DOM
-      setInterval(() => Shell.refresh && Shell.refresh(), 3000);
     }
   }, 200);
 })();
