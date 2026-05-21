@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RC Anna Toolkit
 // @namespace    https://github.com/Anna-SAP/RC_anna
-// @version      0.2.0
-// @description  Extensible userscript toolkit for RingCentral web app. Features: Bookmark Search, Conversation Search.
+// @version      0.2.1
+// @description  Extensible userscript toolkit for RingCentral web app. Features: Bookmark Search, Conversation Search. Scan results now also show the earliest item's posted time.
 // @author       Anna
 // @match        https://app.ringcentral.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   'use strict';
 
   // =====================================================================
-  // RCX core
+  // RCX core (same as 0.2.0)
   // =====================================================================
   const RCX = (window.__RCX = window.__RCX || {
     features: [],
@@ -75,6 +75,8 @@
           .rcx-btn:hover{background:#e8ecf1}
           .rcx-btn[disabled]{opacity:.5;cursor:not-allowed}
           .rcx-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+          .rcx-info{font-size:12px;color:#666;line-height:1.5}
+          .rcx-info b{color:#222;font-weight:600}
           .rcx-list{display:flex;flex-direction:column;gap:2px;max-height:50vh;overflow:auto}
           .rcx-item{padding:6px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
           .rcx-item:hover{background:#f0f4fa;border-color:#dde4ef}
@@ -209,7 +211,6 @@
       activate(stillActive ? activeId : (available[0] ? available[0].id : null));
     }
 
-    // SPA route watcher (no periodic rebuild — that would steal focus)
     let lastUrl = location.href;
     setInterval(() => {
       if (location.href !== lastUrl) {
@@ -229,6 +230,41 @@
   const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const norm = (s) => (s || '').trim().replace(/\s+/g, ' ');
 
+  // Try to extract the visible "posted time" text from a message card.
+  // RC uses .conversation-card-head__right for this; format varies:
+  //   "1:20 PM"           (today)
+  //   "Mon, 1:20 PM"      (within last week)
+  //   "Apr 12"            (this year)
+  //   "Apr 12, 2024"      (older than a year)
+  function extractCardTimeText(cardEl) {
+    if (!cardEl) return '';
+    const head = cardEl.querySelector('.conversation-card-head__right');
+    if (!head) return '';
+    return norm(head.innerText);
+  }
+
+  // Render the info line. Earliest time is shown when known.
+  function renderInfo(infoEl, { matched, total, earliestTimeText, earliestSourceId }) {
+    infoEl.innerHTML = '';
+    const main = document.createElement('span');
+    if (matched == null || matched === total) {
+      main.innerHTML = `共 <b>${total}</b> 条`;
+    } else {
+      main.innerHTML = `<b>${matched}</b> / ${total} 条匹配`;
+    }
+    infoEl.appendChild(main);
+    if (earliestTimeText) {
+      const sep = document.createElement('span');
+      sep.textContent = ' · 最早 ';
+      sep.style.color = '#888';
+      const t = document.createElement('span');
+      t.textContent = earliestTimeText;
+      t.style.color = '#222';
+      infoEl.appendChild(sep);
+      infoEl.appendChild(t);
+    }
+  }
+
   // =====================================================================
   // Feature: Bookmark Search
   // =====================================================================
@@ -238,6 +274,7 @@
     match: (url) => url.includes('/messages/bookmarks'),
     init(ctx) {
       const { h } = ctx;
+      // cache items: { text, offsetTop, sortKey (number), timeText }
       let cache = [];
       let listbox = null;
       let scrollEl = null;
@@ -245,11 +282,12 @@
       const input = h('input', { class: 'rcx-input', placeholder: '输入关键词搜索 (先点 Scan)' });
       const scanBtn = h('button', { class: 'rcx-btn' }, '⟳ Scan');
       const clearBtn = h('button', { class: 'rcx-btn' }, 'Clear');
-      const info = h('div', { class: 'rcx-muted' }, '未扫描');
+      const info = h('div', { class: 'rcx-info' }, '未扫描');
       const list = h('div', { class: 'rcx-list' });
 
       ctx.panel.append(
-        h('div', { class: 'rcx-row' }, scanBtn, clearBtn, info),
+        h('div', { class: 'rcx-row' }, scanBtn, clearBtn),
+        info,
         input,
         list
       );
@@ -266,8 +304,7 @@
         }
         for (const lb of all) {
           const parent = lb.parentElement;
-          if (parent && parent.scrollHeight > parent.clientHeight + 100
-              && lb.scrollHeight > 500) {
+          if (parent && parent.scrollHeight > parent.clientHeight + 100 && lb.scrollHeight > 500) {
             return { listbox: lb, scrollEl: parent };
           }
         }
@@ -279,6 +316,23 @@
         return Array.from(listbox.children).filter(c =>
           c.tagName === 'DIV' && c.offsetHeight > 20 && (c.innerText || '').trim().length > 0
         );
+      }
+
+      // earliest = item with the smallest message id we can read from the
+      // card. Bookmarks may not always expose an id, in which case we
+      // fall back to scroll position (later items = newer? actually RC
+      // shows bookmarks in the order they were created, with the most
+      // recently bookmarked at the TOP — so "earliest" by position is
+      // the BOTTOM-most item). To be robust we prefer message id.
+      function computeEarliest() {
+        if (!cache.length) return null;
+        const withId = cache.filter(c => c.sortKey != null);
+        if (withId.length) {
+          const min = withId.reduce((a, b) => (a.sortKey < b.sortKey ? a : b));
+          return min;
+        }
+        // fallback: bottom item
+        return cache[cache.length - 1];
       }
 
       async function scanAll() {
@@ -297,10 +351,14 @@
           const items = getItems();
           items.forEach(el => {
             const top = el.offsetTop;
-            if (!seen.has(top)) {
-              const txt = norm(el.innerText);
-              if (txt) seen.set(top, { text: txt, offsetTop: top });
-            }
+            if (seen.has(top)) return;
+            const txt = norm(el.innerText);
+            if (!txt) return;
+            // try to read message id from inside this bookmark card
+            const innerCard = el.querySelector('[data-ally-id]');
+            const sortKey = innerCard ? Number(innerCard.getAttribute('data-ally-id')) : null;
+            const timeText = extractCardTimeText(el);
+            seen.set(top, { text: txt, offsetTop: top, sortKey: isFinite(sortKey) ? sortKey : null, timeText });
           });
           const total = listbox.scrollHeight;
           info.textContent = `扫描中… ${seen.size} 条 (${Math.min(pos,total)}/${total}px)`;
@@ -312,13 +370,14 @@
         }
         scrollEl.scrollTop = 0;
         cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
-        info.textContent = `共 ${cache.length} 条`;
         render(input.value);
       }
 
       function render(q) {
         list.innerHTML = '';
         if (!cache.length) {
+          renderInfo(info, { total: 0 });
+          info.textContent = '请先点 Scan 扫描';
           list.appendChild(h('div', { class: 'rcx-muted' }, '请先点 Scan 扫描'));
           return;
         }
@@ -328,7 +387,12 @@
           const ql = q.toLowerCase();
           arr = cache.filter(c => c.text.toLowerCase().includes(ql));
         }
-        info.textContent = `${arr.length} / ${cache.length} 条匹配`;
+        const earliest = computeEarliest();
+        renderInfo(info, {
+          matched: q ? arr.length : undefined,
+          total: cache.length,
+          earliestTimeText: earliest && earliest.timeText ? earliest.timeText : null
+        });
         const reg = q ? new RegExp(escapeReg(q), 'ig') : null;
         arr.slice(0, 200).forEach(item => {
           const snippet = item.text.length > 220 ? item.text.slice(0, 220) + '…' : item.text;
@@ -357,7 +421,7 @@
       }
 
       scanBtn.addEventListener('click', scanAll);
-      clearBtn.addEventListener('click', () => { cache = []; input.value = ''; info.textContent = '已清空'; render(''); });
+      clearBtn.addEventListener('click', () => { cache = []; input.value = ''; render(''); });
 
       let t;
       input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => render(input.value), 150); });
@@ -368,19 +432,6 @@
 
   // =====================================================================
   // Feature: Conversation Search
-  // ---------------------------------------------------------------------
-  // RingCentral conversation page (e.g. /messages/<conv-id>) loads
-  // historical messages by scrolling UP to the top. The message list is
-  // virtualized via [data-test-automation-id="virtualized-list"] inside
-  // [aria-label="Conversation messages"]. Each rendered message is a DIV
-  // with className containing "primary-card" and a stable
-  // data-ally-id (the message ID).
-  //
-  // Scan strategy: repeatedly set scrollTop=0 and wait; whenever new
-  // history is loaded the virtualized-list's scrollHeight grows. After
-  // scrollHeight stops growing for a few rounds we then scroll from top
-  // to bottom to harvest all message cards (because at any moment only a
-  // few are actually rendered).
   // =====================================================================
   RCX.register({
     id: 'conversation-search',
@@ -388,21 +439,23 @@
     match: (url) => /\/messages\/\d+/.test(url) && !url.includes('/bookmarks'),
     init(ctx) {
       const { h } = ctx;
-      let cache = []; // [{id, text, offsetTop}]
-      let vl = null;  // virtualized-list element (the scroller)
+      // cache items: { id (string), idNum (number), text, offsetTop, timeText }
+      let cache = [];
+      let vl = null;
 
       const input = h('input', { class: 'rcx-input', placeholder: '输入关键词搜索本会话 (先点 Scan)' });
       const scanBtn = h('button', { class: 'rcx-btn' }, '⟳ Scan');
       const stopBtn = h('button', { class: 'rcx-btn' }, 'Stop');
       const clearBtn = h('button', { class: 'rcx-btn' }, 'Clear');
-      const info = h('div', { class: 'rcx-muted' }, '未扫描');
+      const info = h('div', { class: 'rcx-info' }, '未扫描');
       const hint = h('div', { class: 'rcx-muted' },
         'Scan 会反复向上滚以加载历史消息，再向下滚一遍收集内容。会话越长耗时越久。');
       const list = h('div', { class: 'rcx-list' });
 
       stopBtn.disabled = true;
       ctx.panel.append(
-        h('div', { class: 'rcx-row' }, scanBtn, stopBtn, clearBtn, info),
+        h('div', { class: 'rcx-row' }, scanBtn, stopBtn, clearBtn),
+        info,
         input,
         hint,
         list
@@ -411,14 +464,12 @@
       function findScroller() {
         const region = document.querySelector('[aria-label="Conversation messages"]');
         if (!region) return null;
-        const v = region.querySelector('[data-test-automation-id="virtualized-list"]');
-        return v || null;
+        return region.querySelector('[data-test-automation-id="virtualized-list"]');
       }
 
       function getVisibleMessages() {
         if (!vl) return [];
-        // collect all .primary-card descendants currently rendered
-        return Array.from(vl.querySelectorAll('div.primary-card, div[class*="primary-card"]'))
+        return Array.from(vl.querySelectorAll('div[class*="primary-card"]'))
           .filter(el => el.offsetHeight > 10);
       }
 
@@ -432,15 +483,35 @@
       function harvest(seen) {
         const msgs = getVisibleMessages();
         msgs.forEach(el => {
-          const id = el.getAttribute('data-ally-id')
-                  || el.getAttribute('data-id')
-                  || el.getAttribute('data-navigation-id')
-                  || ('top:' + Math.round(relTopWithinScroller(el)));
-          if (!seen.has(id)) {
-            const txt = norm(el.innerText);
-            if (txt) seen.set(id, { id, text: txt, offsetTop: Math.round(relTopWithinScroller(el)) });
+          const idAttr = el.getAttribute('data-ally-id') || el.getAttribute('data-id') || '';
+          const id = idAttr || ('top:' + Math.round(relTopWithinScroller(el)));
+          if (seen.has(id)) {
+            // refresh offsetTop & timeText (in case new history shifted positions)
+            const exist = seen.get(id);
+            exist.offsetTop = Math.round(relTopWithinScroller(el));
+            if (!exist.timeText) exist.timeText = extractCardTimeText(el);
+            return;
           }
+          const txt = norm(el.innerText);
+          if (!txt) return;
+          const idNum = Number(idAttr);
+          seen.set(id, {
+            id,
+            idNum: isFinite(idNum) ? idNum : null,
+            text: txt,
+            offsetTop: Math.round(relTopWithinScroller(el)),
+            timeText: extractCardTimeText(el),
+          });
         });
+      }
+
+      function computeEarliest() {
+        if (!cache.length) return null;
+        const withId = cache.filter(c => c.idNum != null);
+        if (withId.length) {
+          return withId.reduce((a, b) => (a.idNum < b.idNum ? a : b));
+        }
+        return cache[0]; // smallest offsetTop
       }
 
       let aborted = false;
@@ -451,19 +522,17 @@
         scanBtn.disabled = true; stopBtn.disabled = false;
         const seen = new Map();
 
-        // Phase 1: load all history by scrolling UP repeatedly
         info.textContent = '加载历史中… (向上滚)';
-        let lastSH = -1, stableRounds = 0;
-        let phase1Rounds = 0;
+        let lastSH = -1, stableRounds = 0, phase1Rounds = 0;
         while (!aborted && phase1Rounds < 400) {
           vl.scrollTop = 0;
-          await sleep(700); // give server time to fetch
+          await sleep(700);
           harvest(seen);
           const sh = vl.scrollHeight;
           info.textContent = `加载历史… 已知 ${seen.size} 条, 列表高度 ${sh}px`;
           if (sh === lastSH) {
             stableRounds++;
-            if (stableRounds >= 3) break; // history exhausted
+            if (stableRounds >= 3) break;
           } else {
             stableRounds = 0;
             lastSH = sh;
@@ -471,7 +540,6 @@
           phase1Rounds++;
         }
 
-        // Phase 2: scroll DOWN through the whole list to harvest cards
         if (!aborted) {
           info.textContent = '收集消息中… (向下滚)';
           vl.scrollTop = 0;
@@ -490,7 +558,6 @@
         }
 
         cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
-        info.textContent = aborted ? `已停止，已收集 ${cache.length} 条` : `共 ${cache.length} 条消息`;
         scanBtn.disabled = false; stopBtn.disabled = true;
         render(input.value);
       }
@@ -498,6 +565,8 @@
       function render(q) {
         list.innerHTML = '';
         if (!cache.length) {
+          renderInfo(info, { total: 0 });
+          info.textContent = '请先点 Scan 扫描';
           list.appendChild(h('div', { class: 'rcx-muted' }, '请先点 Scan 扫描'));
           return;
         }
@@ -507,7 +576,12 @@
           const ql = q.toLowerCase();
           arr = cache.filter(c => c.text.toLowerCase().includes(ql));
         }
-        info.textContent = `${arr.length} / ${cache.length} 条匹配`;
+        const earliest = computeEarliest();
+        renderInfo(info, {
+          matched: q ? arr.length : undefined,
+          total: cache.length,
+          earliestTimeText: earliest && earliest.timeText ? earliest.timeText : null
+        });
         const reg = q ? new RegExp(escapeReg(q), 'ig') : null;
         arr.slice(0, 200).forEach(item => {
           const snippet = item.text.length > 260 ? item.text.slice(0, 260) + '…' : item.text;
@@ -515,68 +589,8 @@
           const row = h('div', { class: 'rcx-item' });
           const span = document.createElement('span');
           span.className = 'rcx-snippet';
-          span.innerHTML = html;
-          row.appendChild(span);
-          row.addEventListener('click', () => jumpTo(item));
-          list.appendChild(row);
-        });
-        if (arr.length > 200) list.appendChild(h('div', { class: 'rcx-muted' }, '仅显示前 200 条，请细化关键词'));
-      }
-
-      async function jumpTo(item) {
-        vl = findScroller();
-        if (!vl) return;
-        vl.scrollTop = Math.max(0, item.offsetTop - 80);
-        await sleep(250);
-        // find a card whose data-ally-id matches, else nearest by top
-        const cards = getVisibleMessages();
-        let target = cards.find(c => c.getAttribute('data-ally-id') === item.id);
-        if (!target) {
-          let best = null, bestDiff = Infinity;
-          cards.forEach(c => {
-            const d = Math.abs(relTopWithinScroller(c) - item.offsetTop);
-            if (d < bestDiff) { bestDiff = d; best = c; }
-          });
-          target = best;
-        }
-        flashHighlight(target);
-      }
-
-      scanBtn.addEventListener('click', scanAll);
-      stopBtn.addEventListener('click', () => { aborted = true; });
-      clearBtn.addEventListener('click', () => { cache = []; input.value = ''; info.textContent = '已清空'; render(''); });
-
-      let t;
-      input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => render(input.value), 150); });
-
-      ctx.onDestroy(() => { aborted = true; });
-      render('');
-    },
-  });
-
-  // ---- shared highlight helper ----
-  function flashHighlight(el) {
-    if (!el) return;
-    const oldBox = el.style.boxShadow;
-    const oldBg = el.style.backgroundColor;
-    const oldTrans = el.style.transition;
-    el.style.transition = 'all .3s';
-    el.style.boxShadow = '0 0 0 2px #ff9800 inset';
-    el.style.backgroundColor = '#fff8e1';
-    setTimeout(() => {
-      el.style.boxShadow = oldBox;
-      el.style.backgroundColor = oldBg;
-      el.style.transition = oldTrans;
-    }, 2800);
-  }
-
-  // =====================================================================
-  // Boot
-  // =====================================================================
-  const boot = setInterval(() => {
-    if (document.body) {
-      clearInterval(boot);
-      setTimeout(() => Shell.refresh && Shell.refresh(), 500);
-    }
-  }, 200);
-})();
+          // prefix time if available
+          if (item.timeText) {
+            const prefix = document.createElement('span');
+            prefix.style.cssText = 'color:#888;margin-right:6px;font-size:11px';
+            prefix.textContent = '
