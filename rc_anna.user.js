@@ -620,4 +620,120 @@
             stableRounds = 0;
             lastSH = sh;
           }
-          phase1Roun
+          phase1Rounds++;
+        }
+
+        // Phase 2: scroll DOWN through the whole list to harvest cards
+        if (!aborted) {
+          info.textContent = '收集消息中… (向下滚)';
+          vl.scrollTop = 0;
+          await sleep(300);
+          const total = vl.scrollHeight;
+          const step = Math.max(200, vl.clientHeight - 100);
+          let pos = 0, safety = 0;
+          while (!aborted && safety < 800) {
+            vl.scrollTop = pos;
+            await sleep(180);
+            harvest(seen);
+            info.textContent = `收集中… ${seen.size} 条 (${Math.min(pos,total)}/${total}px)`;
+            if (pos >= total) break;
+            pos += step;
+            safety++;
+          }
+        }
+
+        cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
+        scanBtn.disabled = false;
+        stopBtn.disabled = true;
+        render(input.value);
+      }
+
+      function render(q) {
+        list.innerHTML = '';
+        if (!cache.length) {
+          info.textContent = '请先点 Scan 扫描';
+          list.appendChild(h('div', { class: 'rcx-muted' }, '请先点 Scan 扫描'));
+          return;
+        }
+        q = (q || '').trim();
+        let arr = cache;
+        if (q) {
+          const ql = q.toLowerCase();
+          arr = cache.filter(c => c.text.toLowerCase().includes(ql));
+        }
+        const earliest = computeEarliest();
+        renderInfo(info, {
+          matched: q ? arr.length : undefined,
+          total: cache.length,
+          earliestTimeText: earliest && earliest.timeText ? earliest.timeText : null,
+        });
+        const reg = q ? new RegExp(escapeReg(q), 'ig') : null;
+        arr.slice(0, 200).forEach(item => {
+          const snippet = item.text.length > 260 ? item.text.slice(0, 260) + '…' : item.text;
+          const html = reg ? escapeHtml(snippet).replace(reg, m => `<mark>${m}</mark>`) : escapeHtml(snippet);
+          const row = h('div', { class: 'rcx-item' });
+          if (item.timeText) {
+            const t = document.createElement('span');
+            t.className = 'rcx-time';
+            t.textContent = item.timeText;
+            row.appendChild(t);
+          }
+          const span = document.createElement('span');
+          span.className = 'rcx-snippet';
+          span.innerHTML = html;
+          row.appendChild(span);
+          row.addEventListener('click', () => jumpTo(item));
+          list.appendChild(row);
+        });
+        if (arr.length > 200) {
+          list.appendChild(h('div', { class: 'rcx-muted' }, '仅显示前 200 条，请细化关键词'));
+        }
+      }
+
+      async function jumpTo(item) {
+        vl = findScroller();
+        if (!vl) return;
+        vl.scrollTop = Math.max(0, item.offsetTop - 80);
+        await sleep(250);
+        const cards = getVisibleMessages();
+        let target = cards.find(c => c.getAttribute('data-ally-id') === item.id);
+        if (!target) {
+          let best = null, bestDiff = Infinity;
+          cards.forEach(c => {
+            const d = Math.abs(relTopWithinScroller(c) - item.offsetTop);
+            if (d < bestDiff) { bestDiff = d; best = c; }
+          });
+          target = best;
+        }
+        flashHighlight(target);
+      }
+
+      scanBtn.addEventListener('click', scanAll);
+      stopBtn.addEventListener('click', () => { aborted = true; });
+      clearBtn.addEventListener('click', () => {
+        cache = [];
+        input.value = '';
+        render('');
+      });
+
+      let t;
+      input.addEventListener('input', () => {
+        clearTimeout(t);
+        t = setTimeout(() => render(input.value), 150);
+      });
+
+      ctx.onDestroy(() => { aborted = true; });
+      render('');
+    },
+  });
+
+  // =====================================================================
+  // Boot
+  // =====================================================================
+  const boot = setInterval(() => {
+    if (document.body) {
+      clearInterval(boot);
+      setTimeout(() => Shell.refresh && Shell.refresh(), 500);
+    }
+  }, 200);
+})();
