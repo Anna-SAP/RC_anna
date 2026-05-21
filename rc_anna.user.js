@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RC Anna Toolkit
 // @namespace    https://github.com/Anna-SAP/RC_anna
-// @version      0.2.1
-// @description  Extensible userscript toolkit for RingCentral web app. Features: Bookmark Search, Conversation Search. Scan results now also show the earliest item's posted time.
+// @version      0.1.1
+// @description  Extensible userscript toolkit for RingCentral web app. Currently includes: Bookmark Search.
 // @author       Anna
 // @match        https://app.ringcentral.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   'use strict';
 
   // =====================================================================
-  // RCX core (same as 0.2.0)
+  // RCX core: a tiny extensible framework
   // =====================================================================
   const RCX = (window.__RCX = window.__RCX || {
     features: [],
@@ -31,9 +31,10 @@
     },
   });
 
+  // ---------- floating shell (tabs container) ----------
   const Shell = (function () {
     let host, tabsEl, bodyEl, statusEl;
-    const mounted = new Map();
+    const mounted = new Map(); // featureId -> {root, ctx, destroyers:[]}
     let activeId = null;
 
     function ensureHost() {
@@ -53,9 +54,11 @@
           #rcx-shell header button{cursor:pointer;border:1px solid #c8ccd1;background:#fff;
             border-radius:4px;padding:2px 6px;font-size:11px}
           #rcx-tabs{display:flex;flex-wrap:wrap;gap:2px;padding:6px 10px;border-bottom:1px solid #eee;background:#f5f7fa}
+          /* single-tab title style: not button-like */
           #rcx-tabs.single .rcx-tab{cursor:default;background:transparent;border:none;
             color:#0b66c2;font-weight:600;font-size:13px;padding:2px 0}
           #rcx-tabs.single .rcx-tab:hover{background:transparent}
+          /* multi-tab button style */
           #rcx-tabs:not(.single) .rcx-tab{cursor:pointer;border:1px solid transparent;background:transparent;
             border-radius:4px;padding:3px 8px;font-size:12px;color:#444}
           #rcx-tabs:not(.single) .rcx-tab:hover{background:#e8ecf1}
@@ -73,15 +76,11 @@
           .rcx-btn{cursor:pointer;border:1px solid #c8ccd1;background:#f5f7fa;
             border-radius:4px;padding:4px 10px;font-size:12px}
           .rcx-btn:hover{background:#e8ecf1}
-          .rcx-btn[disabled]{opacity:.5;cursor:not-allowed}
           .rcx-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-          .rcx-info{font-size:12px;color:#666;line-height:1.5}
-          .rcx-info b{color:#222;font-weight:600}
           .rcx-list{display:flex;flex-direction:column;gap:2px;max-height:50vh;overflow:auto}
           .rcx-item{padding:6px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
           .rcx-item:hover{background:#f0f4fa;border-color:#dde4ef}
           .rcx-item mark{background:#fff2a8;padding:0 1px}
-          .rcx-item .rcx-snippet{display:block;white-space:pre-wrap;word-break:break-word}
           .rcx-muted{color:#888;font-size:12px}
         </style>
         <header id="rcx-head">
@@ -195,10 +194,11 @@
       available.forEach(f => mount(f));
 
       tabsEl.innerHTML = '';
+      // single-tab vs multi-tab visual style
       tabsEl.classList.toggle('single', available.length === 1);
       RCX.features.forEach(f => {
         const ok = available.includes(f);
-        if (!ok && available.length <= 1) return;
+        if (!ok && available.length === 1) return; // hide disabled tabs in single mode
         const t = document.createElement('div');
         t.className = 'rcx-tab' + (ok ? '' : ' disabled');
         t.dataset.id = f.id;
@@ -211,6 +211,8 @@
       activate(stillActive ? activeId : (available[0] ? available[0].id : null));
     }
 
+    // Watch for SPA route changes ONLY (don't periodically rebuild — that
+    // would kill focus on inputs).
     let lastUrl = location.href;
     setInterval(() => {
       if (location.href !== lastUrl) {
@@ -223,50 +225,15 @@
   })();
 
   // =====================================================================
-  // Shared helpers
-  // =====================================================================
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-  const norm = (s) => (s || '').trim().replace(/\s+/g, ' ');
-
-  // Try to extract the visible "posted time" text from a message card.
-  // RC uses .conversation-card-head__right for this; format varies:
-  //   "1:20 PM"           (today)
-  //   "Mon, 1:20 PM"      (within last week)
-  //   "Apr 12"            (this year)
-  //   "Apr 12, 2024"      (older than a year)
-  function extractCardTimeText(cardEl) {
-    if (!cardEl) return '';
-    const head = cardEl.querySelector('.conversation-card-head__right');
-    if (!head) return '';
-    return norm(head.innerText);
-  }
-
-  // Render the info line. Earliest time is shown when known.
-  function renderInfo(infoEl, { matched, total, earliestTimeText, earliestSourceId }) {
-    infoEl.innerHTML = '';
-    const main = document.createElement('span');
-    if (matched == null || matched === total) {
-      main.innerHTML = `共 <b>${total}</b> 条`;
-    } else {
-      main.innerHTML = `<b>${matched}</b> / ${total} 条匹配`;
-    }
-    infoEl.appendChild(main);
-    if (earliestTimeText) {
-      const sep = document.createElement('span');
-      sep.textContent = ' · 最早 ';
-      sep.style.color = '#888';
-      const t = document.createElement('span');
-      t.textContent = earliestTimeText;
-      t.style.color = '#222';
-      infoEl.appendChild(sep);
-      infoEl.appendChild(t);
-    }
-  }
-
-  // =====================================================================
   // Feature: Bookmark Search
+  // ---------------------------------------------------------------------
+  // RingCentral bookmark list specifics (as of 2026-05):
+  //   * Multiple [role="listbox"] exist on the page (emoji pickers etc.)
+  //   * The bookmark one is the listbox whose closest [aria-label] is
+  //     "Bookmarks Page", and whose parent is the virtual-scroll container
+  //     (parent.scrollHeight > parent.clientHeight).
+  //   * Each bookmark item is a DIRECT child <div role="document"> of the
+  //     listbox — NOT role="option".
   // =====================================================================
   RCX.register({
     id: 'bookmark-search',
@@ -274,7 +241,6 @@
     match: (url) => url.includes('/messages/bookmarks'),
     init(ctx) {
       const { h } = ctx;
-      // cache items: { text, offsetTop, sortKey (number), timeText }
       let cache = [];
       let listbox = null;
       let scrollEl = null;
@@ -282,17 +248,18 @@
       const input = h('input', { class: 'rcx-input', placeholder: '输入关键词搜索 (先点 Scan)' });
       const scanBtn = h('button', { class: 'rcx-btn' }, '⟳ Scan');
       const clearBtn = h('button', { class: 'rcx-btn' }, 'Clear');
-      const info = h('div', { class: 'rcx-info' }, '未扫描');
+      const info = h('div', { class: 'rcx-muted' }, '未扫描');
       const list = h('div', { class: 'rcx-list' });
 
       ctx.panel.append(
-        h('div', { class: 'rcx-row' }, scanBtn, clearBtn),
-        info,
+        h('div', { class: 'rcx-row' }, scanBtn, clearBtn, info),
         input,
         list
       );
 
       function findBookmarkListbox() {
+        // pick the listbox that is inside the Bookmarks page region AND
+        // has a virtual-scroll parent.
         const all = document.querySelectorAll('[role="listbox"]');
         for (const lb of all) {
           const ancestor = lb.closest('[aria-label="Bookmarks Page"]');
@@ -302,9 +269,11 @@
             return { listbox: lb, scrollEl: parent };
           }
         }
+        // fallback: any listbox whose parent has a much larger scrollHeight
         for (const lb of all) {
           const parent = lb.parentElement;
-          if (parent && parent.scrollHeight > parent.clientHeight + 100 && lb.scrollHeight > 500) {
+          if (parent && parent.scrollHeight > parent.clientHeight + 100
+              && lb.scrollHeight > 500) {
             return { listbox: lb, scrollEl: parent };
           }
         }
@@ -313,31 +282,21 @@
 
       function getItems() {
         if (!listbox) return [];
+        // direct children that look like a bookmark item
         return Array.from(listbox.children).filter(c =>
-          c.tagName === 'DIV' && c.offsetHeight > 20 && (c.innerText || '').trim().length > 0
+          c.tagName === 'DIV'
+          && c.offsetHeight > 20
+          && (c.innerText || '').trim().length > 0
         );
       }
 
-      // earliest = item with the smallest message id we can read from the
-      // card. Bookmarks may not always expose an id, in which case we
-      // fall back to scroll position (later items = newer? actually RC
-      // shows bookmarks in the order they were created, with the most
-      // recently bookmarked at the TOP — so "earliest" by position is
-      // the BOTTOM-most item). To be robust we prefer message id.
-      function computeEarliest() {
-        if (!cache.length) return null;
-        const withId = cache.filter(c => c.sortKey != null);
-        if (withId.length) {
-          const min = withId.reduce((a, b) => (a.sortKey < b.sortKey ? a : b));
-          return min;
-        }
-        // fallback: bottom item
-        return cache[cache.length - 1];
-      }
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
       async function scanAll() {
         const found = findBookmarkListbox();
-        if (!found) { info.textContent = '未找到 Bookmarks 列表'; return; }
+        if (!found) { info.textContent = '未找到 Bookmarks 列表，请确认在 Bookmarks 页面'; return; }
         listbox = found.listbox; scrollEl = found.scrollEl;
         info.textContent = '扫描中…';
         const seen = new Map();
@@ -351,14 +310,10 @@
           const items = getItems();
           items.forEach(el => {
             const top = el.offsetTop;
-            if (seen.has(top)) return;
-            const txt = norm(el.innerText);
-            if (!txt) return;
-            // try to read message id from inside this bookmark card
-            const innerCard = el.querySelector('[data-ally-id]');
-            const sortKey = innerCard ? Number(innerCard.getAttribute('data-ally-id')) : null;
-            const timeText = extractCardTimeText(el);
-            seen.set(top, { text: txt, offsetTop: top, sortKey: isFinite(sortKey) ? sortKey : null, timeText });
+            if (!seen.has(top)) {
+              const txt = (el.innerText || '').trim().replace(/\s+/g, ' ');
+              if (txt) seen.set(top, { text: txt, offsetTop: top });
+            }
           });
           const total = listbox.scrollHeight;
           info.textContent = `扫描中… ${seen.size} 条 (${Math.min(pos,total)}/${total}px)`;
@@ -370,14 +325,14 @@
         }
         scrollEl.scrollTop = 0;
         cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
+        info.textContent = `共 ${cache.length} 条`;
+        console.log('[RCX] bookmark scan done, count=', cache.length);
         render(input.value);
       }
 
       function render(q) {
         list.innerHTML = '';
         if (!cache.length) {
-          renderInfo(info, { total: 0 });
-          info.textContent = '请先点 Scan 扫描';
           list.appendChild(h('div', { class: 'rcx-muted' }, '请先点 Scan 扫描'));
           return;
         }
@@ -387,12 +342,7 @@
           const ql = q.toLowerCase();
           arr = cache.filter(c => c.text.toLowerCase().includes(ql));
         }
-        const earliest = computeEarliest();
-        renderInfo(info, {
-          matched: q ? arr.length : undefined,
-          total: cache.length,
-          earliestTimeText: earliest && earliest.timeText ? earliest.timeText : null
-        });
+        info.textContent = `${arr.length} / ${cache.length} 条匹配`;
         const reg = q ? new RegExp(escapeReg(q), 'ig') : null;
         arr.slice(0, 200).forEach(item => {
           const snippet = item.text.length > 220 ? item.text.slice(0, 220) + '…' : item.text;
@@ -417,11 +367,18 @@
           const d = Math.abs(el.offsetTop - item.offsetTop);
           if (d < bestDiff) { bestDiff = d; best = el; }
         });
-        flashHighlight(best);
+        if (best) {
+          const oldBox = best.style.boxShadow;
+          const oldBg = best.style.backgroundColor;
+          best.style.transition = 'all .3s';
+          best.style.boxShadow = '0 0 0 2px #ff9800 inset';
+          best.style.backgroundColor = '#fff8e1';
+          setTimeout(() => { best.style.boxShadow = oldBox; best.style.backgroundColor = oldBg; }, 2500);
+        }
       }
 
       scanBtn.addEventListener('click', scanAll);
-      clearBtn.addEventListener('click', () => { cache = []; input.value = ''; render(''); });
+      clearBtn.addEventListener('click', () => { cache = []; input.value = ''; info.textContent = '已清空'; render(''); });
 
       let t;
       input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => render(input.value), 150); });
@@ -431,166 +388,16 @@
   });
 
   // =====================================================================
-  // Feature: Conversation Search
+  // (Add more features here with RCX.register({...}) in the future.)
   // =====================================================================
-  RCX.register({
-    id: 'conversation-search',
-    name: 'Conversation Search',
-    match: (url) => /\/messages\/\d+/.test(url) && !url.includes('/bookmarks'),
-    init(ctx) {
-      const { h } = ctx;
-      // cache items: { id (string), idNum (number), text, offsetTop, timeText }
-      let cache = [];
-      let vl = null;
 
-      const input = h('input', { class: 'rcx-input', placeholder: '输入关键词搜索本会话 (先点 Scan)' });
-      const scanBtn = h('button', { class: 'rcx-btn' }, '⟳ Scan');
-      const stopBtn = h('button', { class: 'rcx-btn' }, 'Stop');
-      const clearBtn = h('button', { class: 'rcx-btn' }, 'Clear');
-      const info = h('div', { class: 'rcx-info' }, '未扫描');
-      const hint = h('div', { class: 'rcx-muted' },
-        'Scan 会反复向上滚以加载历史消息，再向下滚一遍收集内容。会话越长耗时越久。');
-      const list = h('div', { class: 'rcx-list' });
-
-      stopBtn.disabled = true;
-      ctx.panel.append(
-        h('div', { class: 'rcx-row' }, scanBtn, stopBtn, clearBtn),
-        info,
-        input,
-        hint,
-        list
-      );
-
-      function findScroller() {
-        const region = document.querySelector('[aria-label="Conversation messages"]');
-        if (!region) return null;
-        return region.querySelector('[data-test-automation-id="virtualized-list"]');
-      }
-
-      function getVisibleMessages() {
-        if (!vl) return [];
-        return Array.from(vl.querySelectorAll('div[class*="primary-card"]'))
-          .filter(el => el.offsetHeight > 10);
-      }
-
-      function relTopWithinScroller(el) {
-        if (!vl) return 0;
-        const er = el.getBoundingClientRect();
-        const vr = vl.getBoundingClientRect();
-        return (er.top - vr.top) + vl.scrollTop;
-      }
-
-      function harvest(seen) {
-        const msgs = getVisibleMessages();
-        msgs.forEach(el => {
-          const idAttr = el.getAttribute('data-ally-id') || el.getAttribute('data-id') || '';
-          const id = idAttr || ('top:' + Math.round(relTopWithinScroller(el)));
-          if (seen.has(id)) {
-            // refresh offsetTop & timeText (in case new history shifted positions)
-            const exist = seen.get(id);
-            exist.offsetTop = Math.round(relTopWithinScroller(el));
-            if (!exist.timeText) exist.timeText = extractCardTimeText(el);
-            return;
-          }
-          const txt = norm(el.innerText);
-          if (!txt) return;
-          const idNum = Number(idAttr);
-          seen.set(id, {
-            id,
-            idNum: isFinite(idNum) ? idNum : null,
-            text: txt,
-            offsetTop: Math.round(relTopWithinScroller(el)),
-            timeText: extractCardTimeText(el),
-          });
-        });
-      }
-
-      function computeEarliest() {
-        if (!cache.length) return null;
-        const withId = cache.filter(c => c.idNum != null);
-        if (withId.length) {
-          return withId.reduce((a, b) => (a.idNum < b.idNum ? a : b));
-        }
-        return cache[0]; // smallest offsetTop
-      }
-
-      let aborted = false;
-      async function scanAll() {
-        vl = findScroller();
-        if (!vl) { info.textContent = '未找到 Conversation 消息流，请先打开会话'; return; }
-        aborted = false;
-        scanBtn.disabled = true; stopBtn.disabled = false;
-        const seen = new Map();
-
-        info.textContent = '加载历史中… (向上滚)';
-        let lastSH = -1, stableRounds = 0, phase1Rounds = 0;
-        while (!aborted && phase1Rounds < 400) {
-          vl.scrollTop = 0;
-          await sleep(700);
-          harvest(seen);
-          const sh = vl.scrollHeight;
-          info.textContent = `加载历史… 已知 ${seen.size} 条, 列表高度 ${sh}px`;
-          if (sh === lastSH) {
-            stableRounds++;
-            if (stableRounds >= 3) break;
-          } else {
-            stableRounds = 0;
-            lastSH = sh;
-          }
-          phase1Rounds++;
-        }
-
-        if (!aborted) {
-          info.textContent = '收集消息中… (向下滚)';
-          vl.scrollTop = 0;
-          await sleep(300);
-          const total = vl.scrollHeight;
-          const step = Math.max(200, vl.clientHeight - 100);
-          let pos = 0, safety = 0;
-          while (!aborted && safety < 800) {
-            vl.scrollTop = pos;
-            await sleep(180);
-            harvest(seen);
-            info.textContent = `收集中… ${seen.size} 条 (${Math.min(pos,total)}/${total}px)`;
-            if (pos >= total) break;
-            pos += step; safety++;
-          }
-        }
-
-        cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
-        scanBtn.disabled = false; stopBtn.disabled = true;
-        render(input.value);
-      }
-
-      function render(q) {
-        list.innerHTML = '';
-        if (!cache.length) {
-          renderInfo(info, { total: 0 });
-          info.textContent = '请先点 Scan 扫描';
-          list.appendChild(h('div', { class: 'rcx-muted' }, '请先点 Scan 扫描'));
-          return;
-        }
-        q = (q || '').trim();
-        let arr = cache;
-        if (q) {
-          const ql = q.toLowerCase();
-          arr = cache.filter(c => c.text.toLowerCase().includes(ql));
-        }
-        const earliest = computeEarliest();
-        renderInfo(info, {
-          matched: q ? arr.length : undefined,
-          total: cache.length,
-          earliestTimeText: earliest && earliest.timeText ? earliest.timeText : null
-        });
-        const reg = q ? new RegExp(escapeReg(q), 'ig') : null;
-        arr.slice(0, 200).forEach(item => {
-          const snippet = item.text.length > 260 ? item.text.slice(0, 260) + '…' : item.text;
-          const html = reg ? escapeHtml(snippet).replace(reg, m => `<mark>${m}</mark>`) : escapeHtml(snippet);
-          const row = h('div', { class: 'rcx-item' });
-          const span = document.createElement('span');
-          span.className = 'rcx-snippet';
-          // prefix time if available
-          if (item.timeText) {
-            const prefix = document.createElement('span');
-            prefix.style.cssText = 'color:#888;margin-right:6px;font-size:11px';
-            prefix.textContent = '
+  // Initial mount once DOM is ready. NOTE: we DO NOT call refresh on a
+  // timer — the SPA route watcher inside Shell handles re-mounting on
+  // navigation, and periodic rebuilds would steal focus from inputs.
+  const boot = setInterval(() => {
+    if (document.body) {
+      clearInterval(boot);
+      setTimeout(() => Shell.refresh && Shell.refresh(), 500);
+    }
+  }, 200);
+})();
