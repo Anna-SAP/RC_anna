@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RC Anna Toolkit
 // @namespace    https://github.com/Anna-SAP/RC_anna
-// @version      0.1.1
-// @description  Extensible userscript toolkit for RingCentral web app. Currently includes: Bookmark Search.
+// @version      0.2.0
+// @description  Extensible userscript toolkit for RingCentral web app. Features: Bookmark Search, Conversation Search.
 // @author       Anna
 // @match        https://app.ringcentral.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   'use strict';
 
   // =====================================================================
-  // RCX core: a tiny extensible framework
+  // RCX core
   // =====================================================================
   const RCX = (window.__RCX = window.__RCX || {
     features: [],
@@ -31,10 +31,9 @@
     },
   });
 
-  // ---------- floating shell (tabs container) ----------
   const Shell = (function () {
     let host, tabsEl, bodyEl, statusEl;
-    const mounted = new Map(); // featureId -> {root, ctx, destroyers:[]}
+    const mounted = new Map();
     let activeId = null;
 
     function ensureHost() {
@@ -54,11 +53,9 @@
           #rcx-shell header button{cursor:pointer;border:1px solid #c8ccd1;background:#fff;
             border-radius:4px;padding:2px 6px;font-size:11px}
           #rcx-tabs{display:flex;flex-wrap:wrap;gap:2px;padding:6px 10px;border-bottom:1px solid #eee;background:#f5f7fa}
-          /* single-tab title style: not button-like */
           #rcx-tabs.single .rcx-tab{cursor:default;background:transparent;border:none;
             color:#0b66c2;font-weight:600;font-size:13px;padding:2px 0}
           #rcx-tabs.single .rcx-tab:hover{background:transparent}
-          /* multi-tab button style */
           #rcx-tabs:not(.single) .rcx-tab{cursor:pointer;border:1px solid transparent;background:transparent;
             border-radius:4px;padding:3px 8px;font-size:12px;color:#444}
           #rcx-tabs:not(.single) .rcx-tab:hover{background:#e8ecf1}
@@ -76,11 +73,13 @@
           .rcx-btn{cursor:pointer;border:1px solid #c8ccd1;background:#f5f7fa;
             border-radius:4px;padding:4px 10px;font-size:12px}
           .rcx-btn:hover{background:#e8ecf1}
+          .rcx-btn[disabled]{opacity:.5;cursor:not-allowed}
           .rcx-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
           .rcx-list{display:flex;flex-direction:column;gap:2px;max-height:50vh;overflow:auto}
           .rcx-item{padding:6px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
           .rcx-item:hover{background:#f0f4fa;border-color:#dde4ef}
           .rcx-item mark{background:#fff2a8;padding:0 1px}
+          .rcx-item .rcx-snippet{display:block;white-space:pre-wrap;word-break:break-word}
           .rcx-muted{color:#888;font-size:12px}
         </style>
         <header id="rcx-head">
@@ -194,11 +193,10 @@
       available.forEach(f => mount(f));
 
       tabsEl.innerHTML = '';
-      // single-tab vs multi-tab visual style
       tabsEl.classList.toggle('single', available.length === 1);
       RCX.features.forEach(f => {
         const ok = available.includes(f);
-        if (!ok && available.length === 1) return; // hide disabled tabs in single mode
+        if (!ok && available.length <= 1) return;
         const t = document.createElement('div');
         t.className = 'rcx-tab' + (ok ? '' : ' disabled');
         t.dataset.id = f.id;
@@ -211,8 +209,7 @@
       activate(stillActive ? activeId : (available[0] ? available[0].id : null));
     }
 
-    // Watch for SPA route changes ONLY (don't periodically rebuild — that
-    // would kill focus on inputs).
+    // SPA route watcher (no periodic rebuild — that would steal focus)
     let lastUrl = location.href;
     setInterval(() => {
       if (location.href !== lastUrl) {
@@ -225,15 +222,15 @@
   })();
 
   // =====================================================================
+  // Shared helpers
+  // =====================================================================
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  const norm = (s) => (s || '').trim().replace(/\s+/g, ' ');
+
+  // =====================================================================
   // Feature: Bookmark Search
-  // ---------------------------------------------------------------------
-  // RingCentral bookmark list specifics (as of 2026-05):
-  //   * Multiple [role="listbox"] exist on the page (emoji pickers etc.)
-  //   * The bookmark one is the listbox whose closest [aria-label] is
-  //     "Bookmarks Page", and whose parent is the virtual-scroll container
-  //     (parent.scrollHeight > parent.clientHeight).
-  //   * Each bookmark item is a DIRECT child <div role="document"> of the
-  //     listbox — NOT role="option".
   // =====================================================================
   RCX.register({
     id: 'bookmark-search',
@@ -258,8 +255,6 @@
       );
 
       function findBookmarkListbox() {
-        // pick the listbox that is inside the Bookmarks page region AND
-        // has a virtual-scroll parent.
         const all = document.querySelectorAll('[role="listbox"]');
         for (const lb of all) {
           const ancestor = lb.closest('[aria-label="Bookmarks Page"]');
@@ -269,7 +264,6 @@
             return { listbox: lb, scrollEl: parent };
           }
         }
-        // fallback: any listbox whose parent has a much larger scrollHeight
         for (const lb of all) {
           const parent = lb.parentElement;
           if (parent && parent.scrollHeight > parent.clientHeight + 100
@@ -282,21 +276,14 @@
 
       function getItems() {
         if (!listbox) return [];
-        // direct children that look like a bookmark item
         return Array.from(listbox.children).filter(c =>
-          c.tagName === 'DIV'
-          && c.offsetHeight > 20
-          && (c.innerText || '').trim().length > 0
+          c.tagName === 'DIV' && c.offsetHeight > 20 && (c.innerText || '').trim().length > 0
         );
       }
 
-      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-      const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-
       async function scanAll() {
         const found = findBookmarkListbox();
-        if (!found) { info.textContent = '未找到 Bookmarks 列表，请确认在 Bookmarks 页面'; return; }
+        if (!found) { info.textContent = '未找到 Bookmarks 列表'; return; }
         listbox = found.listbox; scrollEl = found.scrollEl;
         info.textContent = '扫描中…';
         const seen = new Map();
@@ -311,7 +298,7 @@
           items.forEach(el => {
             const top = el.offsetTop;
             if (!seen.has(top)) {
-              const txt = (el.innerText || '').trim().replace(/\s+/g, ' ');
+              const txt = norm(el.innerText);
               if (txt) seen.set(top, { text: txt, offsetTop: top });
             }
           });
@@ -326,7 +313,6 @@
         scrollEl.scrollTop = 0;
         cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
         info.textContent = `共 ${cache.length} 条`;
-        console.log('[RCX] bookmark scan done, count=', cache.length);
         render(input.value);
       }
 
@@ -367,14 +353,7 @@
           const d = Math.abs(el.offsetTop - item.offsetTop);
           if (d < bestDiff) { bestDiff = d; best = el; }
         });
-        if (best) {
-          const oldBox = best.style.boxShadow;
-          const oldBg = best.style.backgroundColor;
-          best.style.transition = 'all .3s';
-          best.style.boxShadow = '0 0 0 2px #ff9800 inset';
-          best.style.backgroundColor = '#fff8e1';
-          setTimeout(() => { best.style.boxShadow = oldBox; best.style.backgroundColor = oldBg; }, 2500);
-        }
+        flashHighlight(best);
       }
 
       scanBtn.addEventListener('click', scanAll);
@@ -388,12 +367,212 @@
   });
 
   // =====================================================================
-  // (Add more features here with RCX.register({...}) in the future.)
+  // Feature: Conversation Search
+  // ---------------------------------------------------------------------
+  // RingCentral conversation page (e.g. /messages/<conv-id>) loads
+  // historical messages by scrolling UP to the top. The message list is
+  // virtualized via [data-test-automation-id="virtualized-list"] inside
+  // [aria-label="Conversation messages"]. Each rendered message is a DIV
+  // with className containing "primary-card" and a stable
+  // data-ally-id (the message ID).
+  //
+  // Scan strategy: repeatedly set scrollTop=0 and wait; whenever new
+  // history is loaded the virtualized-list's scrollHeight grows. After
+  // scrollHeight stops growing for a few rounds we then scroll from top
+  // to bottom to harvest all message cards (because at any moment only a
+  // few are actually rendered).
   // =====================================================================
+  RCX.register({
+    id: 'conversation-search',
+    name: 'Conversation Search',
+    match: (url) => /\/messages\/\d+/.test(url) && !url.includes('/bookmarks'),
+    init(ctx) {
+      const { h } = ctx;
+      let cache = []; // [{id, text, offsetTop}]
+      let vl = null;  // virtualized-list element (the scroller)
 
-  // Initial mount once DOM is ready. NOTE: we DO NOT call refresh on a
-  // timer — the SPA route watcher inside Shell handles re-mounting on
-  // navigation, and periodic rebuilds would steal focus from inputs.
+      const input = h('input', { class: 'rcx-input', placeholder: '输入关键词搜索本会话 (先点 Scan)' });
+      const scanBtn = h('button', { class: 'rcx-btn' }, '⟳ Scan');
+      const stopBtn = h('button', { class: 'rcx-btn' }, 'Stop');
+      const clearBtn = h('button', { class: 'rcx-btn' }, 'Clear');
+      const info = h('div', { class: 'rcx-muted' }, '未扫描');
+      const hint = h('div', { class: 'rcx-muted' },
+        'Scan 会反复向上滚以加载历史消息，再向下滚一遍收集内容。会话越长耗时越久。');
+      const list = h('div', { class: 'rcx-list' });
+
+      stopBtn.disabled = true;
+      ctx.panel.append(
+        h('div', { class: 'rcx-row' }, scanBtn, stopBtn, clearBtn, info),
+        input,
+        hint,
+        list
+      );
+
+      function findScroller() {
+        const region = document.querySelector('[aria-label="Conversation messages"]');
+        if (!region) return null;
+        const v = region.querySelector('[data-test-automation-id="virtualized-list"]');
+        return v || null;
+      }
+
+      function getVisibleMessages() {
+        if (!vl) return [];
+        // collect all .primary-card descendants currently rendered
+        return Array.from(vl.querySelectorAll('div.primary-card, div[class*="primary-card"]'))
+          .filter(el => el.offsetHeight > 10);
+      }
+
+      function relTopWithinScroller(el) {
+        if (!vl) return 0;
+        const er = el.getBoundingClientRect();
+        const vr = vl.getBoundingClientRect();
+        return (er.top - vr.top) + vl.scrollTop;
+      }
+
+      function harvest(seen) {
+        const msgs = getVisibleMessages();
+        msgs.forEach(el => {
+          const id = el.getAttribute('data-ally-id')
+                  || el.getAttribute('data-id')
+                  || el.getAttribute('data-navigation-id')
+                  || ('top:' + Math.round(relTopWithinScroller(el)));
+          if (!seen.has(id)) {
+            const txt = norm(el.innerText);
+            if (txt) seen.set(id, { id, text: txt, offsetTop: Math.round(relTopWithinScroller(el)) });
+          }
+        });
+      }
+
+      let aborted = false;
+      async function scanAll() {
+        vl = findScroller();
+        if (!vl) { info.textContent = '未找到 Conversation 消息流，请先打开会话'; return; }
+        aborted = false;
+        scanBtn.disabled = true; stopBtn.disabled = false;
+        const seen = new Map();
+
+        // Phase 1: load all history by scrolling UP repeatedly
+        info.textContent = '加载历史中… (向上滚)';
+        let lastSH = -1, stableRounds = 0;
+        let phase1Rounds = 0;
+        while (!aborted && phase1Rounds < 400) {
+          vl.scrollTop = 0;
+          await sleep(700); // give server time to fetch
+          harvest(seen);
+          const sh = vl.scrollHeight;
+          info.textContent = `加载历史… 已知 ${seen.size} 条, 列表高度 ${sh}px`;
+          if (sh === lastSH) {
+            stableRounds++;
+            if (stableRounds >= 3) break; // history exhausted
+          } else {
+            stableRounds = 0;
+            lastSH = sh;
+          }
+          phase1Rounds++;
+        }
+
+        // Phase 2: scroll DOWN through the whole list to harvest cards
+        if (!aborted) {
+          info.textContent = '收集消息中… (向下滚)';
+          vl.scrollTop = 0;
+          await sleep(300);
+          const total = vl.scrollHeight;
+          const step = Math.max(200, vl.clientHeight - 100);
+          let pos = 0, safety = 0;
+          while (!aborted && safety < 800) {
+            vl.scrollTop = pos;
+            await sleep(180);
+            harvest(seen);
+            info.textContent = `收集中… ${seen.size} 条 (${Math.min(pos,total)}/${total}px)`;
+            if (pos >= total) break;
+            pos += step; safety++;
+          }
+        }
+
+        cache = Array.from(seen.values()).sort((a, b) => a.offsetTop - b.offsetTop);
+        info.textContent = aborted ? `已停止，已收集 ${cache.length} 条` : `共 ${cache.length} 条消息`;
+        scanBtn.disabled = false; stopBtn.disabled = true;
+        render(input.value);
+      }
+
+      function render(q) {
+        list.innerHTML = '';
+        if (!cache.length) {
+          list.appendChild(h('div', { class: 'rcx-muted' }, '请先点 Scan 扫描'));
+          return;
+        }
+        q = (q || '').trim();
+        let arr = cache;
+        if (q) {
+          const ql = q.toLowerCase();
+          arr = cache.filter(c => c.text.toLowerCase().includes(ql));
+        }
+        info.textContent = `${arr.length} / ${cache.length} 条匹配`;
+        const reg = q ? new RegExp(escapeReg(q), 'ig') : null;
+        arr.slice(0, 200).forEach(item => {
+          const snippet = item.text.length > 260 ? item.text.slice(0, 260) + '…' : item.text;
+          const html = reg ? escapeHtml(snippet).replace(reg, m => `<mark>${m}</mark>`) : escapeHtml(snippet);
+          const row = h('div', { class: 'rcx-item' });
+          const span = document.createElement('span');
+          span.className = 'rcx-snippet';
+          span.innerHTML = html;
+          row.appendChild(span);
+          row.addEventListener('click', () => jumpTo(item));
+          list.appendChild(row);
+        });
+        if (arr.length > 200) list.appendChild(h('div', { class: 'rcx-muted' }, '仅显示前 200 条，请细化关键词'));
+      }
+
+      async function jumpTo(item) {
+        vl = findScroller();
+        if (!vl) return;
+        vl.scrollTop = Math.max(0, item.offsetTop - 80);
+        await sleep(250);
+        // find a card whose data-ally-id matches, else nearest by top
+        const cards = getVisibleMessages();
+        let target = cards.find(c => c.getAttribute('data-ally-id') === item.id);
+        if (!target) {
+          let best = null, bestDiff = Infinity;
+          cards.forEach(c => {
+            const d = Math.abs(relTopWithinScroller(c) - item.offsetTop);
+            if (d < bestDiff) { bestDiff = d; best = c; }
+          });
+          target = best;
+        }
+        flashHighlight(target);
+      }
+
+      scanBtn.addEventListener('click', scanAll);
+      stopBtn.addEventListener('click', () => { aborted = true; });
+      clearBtn.addEventListener('click', () => { cache = []; input.value = ''; info.textContent = '已清空'; render(''); });
+
+      let t;
+      input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => render(input.value), 150); });
+
+      ctx.onDestroy(() => { aborted = true; });
+      render('');
+    },
+  });
+
+  // ---- shared highlight helper ----
+  function flashHighlight(el) {
+    if (!el) return;
+    const oldBox = el.style.boxShadow;
+    const oldBg = el.style.backgroundColor;
+    const oldTrans = el.style.transition;
+    el.style.transition = 'all .3s';
+    el.style.boxShadow = '0 0 0 2px #ff9800 inset';
+    el.style.backgroundColor = '#fff8e1';
+    setTimeout(() => {
+      el.style.boxShadow = oldBox;
+      el.style.backgroundColor = oldBg;
+      el.style.transition = oldTrans;
+    }, 2800);
+  }
+
+  // =====================================================================
+  // Boot
+  // =====================================================================
   const boot = setInterval(() => {
     if (document.body) {
       clearInterval(boot);
